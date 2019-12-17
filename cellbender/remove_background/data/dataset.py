@@ -13,6 +13,7 @@ from scipy.stats import mode
 from typing import Dict, List, Union, Tuple
 import logging
 import os
+import gzip
 
 import matplotlib
 matplotlib.use('Agg')
@@ -66,6 +67,7 @@ class SingleCellRNACountsDataset:
         self.analyzed_barcode_inds = np.array([])  # Barcodes trained each epoch
         self.analyzed_gene_inds = np.array([])
         self.empty_barcode_inds = np.array([])  # Barcodes randomized each epoch
+        self.data_type = None  # File format
         self.data = None
         self.model_name = model_name
         self.fraction_empties = fraction_empties
@@ -99,30 +101,47 @@ class SingleCellRNACountsDataset:
         assert self.input_file is not None, \
             "Attempting to load data, but no input file was specified."
 
+        file_ext = os.path.splitext(self.input_file)[1]
+
         # Detect type.
         if os.path.isdir(self.input_file):
             return 'cellranger_mtx'
 
-        else:
+        elif file_ext == '.h5':
             return 'cellranger_h5'
+
+        elif self.input_file.endswith('.txt.gz'):
+            return 'dropseq_dge'
+
+        else:
+            raise ValueError('Failed to determine input file type for '
+                             + self.input_file + '\n'
+                             + 'This must either be: a directory that contains '
+                               'CellRanger MTX outputs; a single CellRanger h5 '
+                               'file; or a DropSeq DGE ".txt.gz" file.')
 
     def _load_data(self):
         """Load a dataset into the SingleCellRNACountsDataset object from
         the self.input_file"""
 
         # Detect input data type.
-        data_type = self._detect_input_data_type()
+        self.data_type = self._detect_input_data_type()
 
         # Load the dataset.
-        if data_type == 'cellranger_mtx':
+        if self.data_type == 'cellranger_mtx':
 
             logging.info(f"Loading data from directory {self.input_file}")
             self.data = get_matrix_from_cellranger_mtx(self.input_file)
 
-        elif data_type == 'cellranger_h5':
+        elif self.data_type == 'cellranger_h5':
 
             logging.info(f"Loading data from file {self.input_file}")
             self.data = get_matrix_from_cellranger_h5(self.input_file)
+
+        elif self.data_type == 'dropseq_dge':
+
+            logging.info(f"Loading data from file {self.input_file}")
+            self.data = get_matrix_from_dropseq_dge(self.input_file)
 
         else:
             raise NotImplementedError
@@ -544,6 +563,27 @@ class SingleCellRNACountsDataset:
             np.savetxt(bc_file_name, barcode_names, delimiter=',', fmt='%s')
             logging.info(f"Saved cell barcodes in {bc_file_name}")
 
+        # Write an additional output in DropSeq DGE format if called for
+        if self.data_type == 'dropseq_dge':
+
+            dge_filename = os.path.join(file_dir, file_name + ".txt.gz")
+            filtered_dge_filename = os.path.join(file_dir,
+                                                 file_name + "_filtered.txt.gz")
+
+            # Full output, all droplets
+            write_dropseq_dge(input_file=self.input_file,
+                              output_file=dge_filename,
+                              gene_names=self.data['gene_names'],
+                              barcodes=self.data['barcodes'],
+                              inferred_count_matrix=inferred_count_matrix)
+
+            # Cells only
+            write_dropseq_dge(input_file=self.input_file,
+                              output_file=filtered_dge_filename,
+                              gene_names=self.data['gene_names'],
+                              barcodes=cell_barcodes,
+                              inferred_count_matrix=inferred_count_matrix[cell_barcode_inds, :])
+
         try:
             # Save plots, if called for.
             if save_plots:
@@ -888,6 +928,83 @@ def get_matrix_from_cellranger_h5(filename: str) \
             'barcodes': np.array(barcodes)}
 
 
+def get_matrix_from_dropseq_dge(filename: str) \
+        -> Dict[str, Union[sp.csr.csr_matrix, List[np.ndarray], np.ndarray]]:
+    """Load a count matrix from a DropSeq DGE matrix file.
+
+    The file needs to be a gzipped text file in DGE format.  This function
+    returns a dictionary that includes the count matrix, the gene names (which
+    correspond to columns of the count matrix), and the barcodes (which
+    correspond to rows of the count matrix).  Reads in the file line by line
+    instead of trying to read in an entire dense matrix at once, which might
+    require quite a bit of memory.
+
+    Args:
+        filename: string path to .txt.gz file that contains the raw gene
+            barcode matrix
+
+    Returns:
+        out['matrix']: scipy.sparse.csr.csr_matrix of unique UMI counts, with
+            barcodes as rows and genes as columns
+        out['barcodes']: numpy array of strings which are the nucleotide
+            sequences of the barcodes that correspond to the rows in
+            the out['matrix']
+        out['gene_names']: List of numpy arrays, where the number of elements
+            in the list is the number of genomes in the dataset.  Each numpy
+            array contains the string names of genes in the genome, which
+            correspond to the columns in the out['matrix'].
+        out['gene_ids']: List of numpy arrays, where the number of elements
+            in the list is the number of genomes in the dataset.  Each numpy
+            array contains the string Ensembl ID of genes in the genome, which
+            also correspond to the columns in the out['matrix'].
+
+    """
+
+    logging.info(f"DropSeq DGE format")
+
+    with gzip.open(filename, 'rt') as f:
+
+        # Skip the comment '#' lines in header
+        for header in f:
+            if header[0] == '#':
+                continue
+            else:
+                break
+
+        # Read in first row with droplet barcodes
+        barcodes = header.split('\n')[0].split('\t')[1:]
+
+        # Gene names are first entry per row
+        gene_names = []
+
+        # Arrays used to construct a sparse matrix
+        row = []
+        col = []
+        data = []
+
+        # Read in rest of file row by row
+        for i, line in enumerate(f):
+            # Parse row into gene name and count data
+            parsed_line = line.split('\n')[0].split('\t')
+            gene_names.append(parsed_line[0])
+            counts = np.array(parsed_line[1:], dtype=np.int)
+
+            # Create sparse version of data and add to arrays
+            nonzero_col_inds = np.nonzero(counts)[0]
+            row.extend([i] * nonzero_col_inds.size)
+            col.extend(nonzero_col_inds)
+            data.extend(counts[nonzero_col_inds])
+
+    count_matrix = sp.csc_matrix((data, (row, col)),
+                                 shape=(len(gene_names), len(barcodes)),
+                                 dtype=np.float).transpose()
+
+    return {'matrix': count_matrix,
+            'gene_names': np.array(gene_names),
+            'gene_ids': None,
+            'barcodes': np.array(barcodes)}
+
+
 def write_matrix_to_cellranger_h5(
         output_file: str,
         gene_names: np.ndarray,
@@ -995,6 +1112,69 @@ def write_matrix_to_cellranger_h5(
                         f"{output_file}.  "
                         f"Output may be incomplete.")
 
+        return False
+
+
+def write_dropseq_dge(
+        input_file: str,
+        output_file: str,
+        barcodes: np.ndarray,
+        gene_names: np.ndarray,
+        inferred_count_matrix: sp.csc.csc_matrix) -> bool:
+    """Write count matrix data to output ".txt.gz" file in DropSeq DGE format.
+
+    Args:
+        input_file: Path to output .txt.gz file
+        output_file: Path to output .txt.gz file (e.g., 'output.txt.gz').
+        gene_names: Name of each gene (column of count matrix).
+        inferred_count_matrix: Count matrix to be written to file, in sparse
+            format.  Rows are barcodes, columns are genes.
+
+    Note:
+        The matrix is stored with rows as genes and barcodes as columns.
+
+    """
+
+    assert gene_names.size == inferred_count_matrix.shape[1], \
+        "Writing DGE output: number of gene names do not match size of count matrix."
+    assert barcodes.size == inferred_count_matrix.shape[0], \
+        "Writing DGE output: number of barcodes do not match size of count matrix."
+
+    try:
+
+        # Get header comment lines from input file
+        header = []
+        with gzip.open(input_file, 'rt') as f:
+            for line in f:
+                if line[0] == '#':
+                    header.append(line)  # comment lines only
+                else:
+                    break
+
+        # Write output file
+        with gzip.open(output_file, 'wt') as f:
+
+            # Write header comment lines
+            for line in header:
+                f.write(line)
+
+            # Write cellbender comment line
+            f.write('# CellBender output\n')
+
+            # Write barcodes
+            f.write('\t'.join(['GENE'] + barcodes.tolist()) + '\n')
+
+            # Write one row per gene
+            for g, gene_name in enumerate(gene_names):
+                dense_counts_g = np.array(inferred_count_matrix[:, g].todense(),
+                                          dtype=np.int).squeeze().astype(str).tolist()
+                f.write('\t'.join([gene_name] + dense_counts_g) + '\n')
+
+        logging.info(f"Succeeded in writing output to file {output_file}")
+
+        return True
+
+    except IOError:
         return False
 
 
