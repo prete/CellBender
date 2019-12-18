@@ -1053,8 +1053,9 @@ def write_matrix_to_cellranger_h5(
         "The number of gene names must match the number of columns in the " \
         "count matrix."
 
-    assert gene_names.size == gene_ids.size, \
-        "The number of gene_names must match the number of gene_ids."
+    if gene_ids is not None:
+        assert gene_names.size == gene_ids.size, \
+            "The number of gene_names must match the number of gene_ids."
 
     assert barcodes.size == inferred_count_matrix.shape[0], \
         "The number of barcodes must match the number of rows in the count" \
@@ -1074,7 +1075,8 @@ def write_matrix_to_cellranger_h5(
 
             # Create arrays within that group for barcodes and gene_names.
             f.create_array(group, "gene_names", gene_names)
-            f.create_array(group, "genes", gene_ids)
+            if gene_ids is not None:
+                f.create_array(group, "genes", gene_ids)
             f.create_array(group, "barcodes", barcodes)
 
             # Create arrays to store the count data.
@@ -1159,7 +1161,7 @@ def write_dropseq_dge(
                 f.write(line)
 
             # Write cellbender comment line
-            f.write('# CellBender output\n')
+            f.write('# cellbender remove-background output\n')
 
             # Write barcodes
             f.write('\t'.join(['GENE'] + barcodes.tolist()) + '\n')
