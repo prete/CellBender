@@ -161,6 +161,10 @@ def run_training(model: RemoveBackgroundPyroModel,
                 logging.info("[epoch %03d] average test loss: %.4f"
                              % (epoch, total_epoch_loss_test))
 
+        if epochs == 0:
+            # Run the guide once to initialize neural networks needed for posterior.
+            model.guide(train_loader.__next__())
+
         logging.info("Inference procedure complete.")
 
     # Exception allows program to continue after ending inference prematurely.
