@@ -170,25 +170,29 @@ class SingleCellRNACountsDataset:
 
         # Get data matrix and barcode order that sorts barcodes by UMI count.
         matrix = self.data['matrix']
-        umi_counts = np.array(matrix.sum(axis=1)).squeeze()
-        umi_count_order = np.argsort(umi_counts)[::-1]
 
         # Initially set the default to be the whole dataset.
         self.analyzed_barcode_inds = np.arange(start=0, stop=matrix.shape[0])
         self.analyzed_gene_inds = np.arange(start=0, stop=matrix.shape[1])
 
-        # Expected cells must not exceed nonzero count barcodes.
-        num_nonzero_barcodes = np.sum(umi_counts > 0).item()
-
         # Choose which genes to use based on their having nonzero counts.
         # (All barcodes must be included so that inference can generalize.)
         gene_counts_per_barcode = np.array(matrix.sum(axis=0)).squeeze()
         if self.exclude_antibodies:
-            antibody_logic = (self.data['feature_types'] == b'Antibody Capture')
-            # Exclude these by setting their counts to zero
-            logging.info(f"Excluding {antibody_logic.sum()} features that "
-                         f"correspond to antibody capture.")
-            gene_counts_per_barcode[antibody_logic] = 0
+            if self.data['feature_types'] is None:
+                logging.warning("Warning: input flag --exclude-antibody-capture "
+                                "was set, but no 'feature_type' data was detected "
+                                "in the input file.  Ignoring the flag, and "
+                                "including all features, assuming they are genes.")
+            else:
+                print(self.data['feature_types'])
+                antibody_logic = ((np.asarray(self.data['feature_types']) == b'Antibody Capture')
+                                  | (np.asarray(self.data['feature_types']) == 'Antibody Capture'))
+                print(antibody_logic)
+                # Exclude these by setting their counts to zero
+                logging.info(f"Excluding {antibody_logic.sum()} features that "
+                             f"correspond to antibody capture.")
+                gene_counts_per_barcode[antibody_logic] = 0
         nonzero_gene_counts = (gene_counts_per_barcode > 0)
         self.analyzed_gene_inds = np.where(nonzero_gene_counts)[0].astype(dtype=int)
 
@@ -201,6 +205,20 @@ class SingleCellRNACountsDataset:
         # Remove blacklisted genes.
         if len(gene_blacklist) > 0:
 
+            n_before = self.analyzed_gene_inds.size
+
+            for g in gene_blacklist:
+                if g >= self.data['matrix'].shape[1]:
+                    logging.warning(f"Gene {g} is in --blacklist-genes, but there "
+                                    f"are {self.data['matrix'].shape[1]} genes in "
+                                    f"the dataset. Use zero-indexing to specify a "
+                                    f"gene by its index.  Ignoring the fact that "
+                                    f"{g} is in blacklist.")
+                elif g not in self.analyzed_gene_inds:
+                    logging.warning(f"Gene {g} is in --blacklist-genes, but it has "
+                                    f"already been excluded due to its feature type.  "
+                                    f"Ignoring the fact that {g} is in blacklist.")
+
             # Make gene_blacklist a set for fast inclusion testing.
             gene_blacklist = set(gene_blacklist)
 
@@ -208,16 +226,27 @@ class SingleCellRNACountsDataset:
             self.analyzed_gene_inds = np.array([g for g in
                                                 self.analyzed_gene_inds
                                                 if g not in gene_blacklist])
+            logging.info(f"Excluding {n_before - self.analyzed_gene_inds.size} "
+                         f"features from blacklist.")
 
         if self.analyzed_gene_inds.size == 0:
-            logging.warning("All nonzero genes have been blacklisted.  "
+            logging.warning("All nonzero features have been excluded.  "
                             "Terminating analysis.")
-            raise AssertionError("All genes with nonzero counts have been "
-                                 "blacklisted.  Examine the dataset and "
-                                 "reduce the blacklist.")
+            raise AssertionError("All features with nonzero counts have been "
+                                 "excluded.  Examine the dataset and "
+                                 "reduce the blacklist or include antibody capture.")
 
         logging.info(f"Including {self.analyzed_gene_inds.size} genes that have"
                      f" nonzero counts.")
+
+        # Get data matrix and barcode order that sorts barcodes by UMI count.
+        trimmed_bc_matrix = self.data['matrix'].tocsc()
+        trimmed_matrix = trimmed_bc_matrix[:, self.analyzed_gene_inds].tocsr()
+        umi_counts = np.array(trimmed_matrix.sum(axis=1)).squeeze()
+        umi_count_order = np.argsort(umi_counts)[::-1]
+
+        # Expected cells must not exceed nonzero count barcodes.
+        num_nonzero_barcodes = np.sum(umi_counts > 0).item()
 
         # Estimate priors on cell size and 'empty' droplet size.
         self.priors['cell_counts'], self.priors['empty_counts'] = \
@@ -238,8 +267,7 @@ class SingleCellRNACountsDataset:
         # If running the simple model, just use the expected cells, no more.
         if self.model_name == "simple":
 
-            self.analyzed_barcode_inds = np.array(umi_count_order[:n_cells],
-                                                  dtype=int)
+            self.analyzed_barcode_inds = np.array(umi_count_order[:n_cells], dtype=int)
 
             logging.info(f"Simple model: using "
                          f"{self.analyzed_barcode_inds.size} cell barcodes.")
@@ -254,8 +282,7 @@ class SingleCellRNACountsDataset:
             # the user input value, or an empirically-derived value.
             empirical_low_UMI = int(self.priors['empty_counts'] *
                                     self.EMPIRICAL_LOW_UMI_TO_EMPTY_DROPLET_THRESHOLD)
-            low_UMI_count_cutoff = max(low_UMI_count_cutoff,
-                                       empirical_low_UMI)
+            low_UMI_count_cutoff = max(low_UMI_count_cutoff, empirical_low_UMI)
             logging.info(f"Excluding barcodes with counts below "
                          f"{low_UMI_count_cutoff}")
 
@@ -288,8 +315,7 @@ class SingleCellRNACountsDataset:
             num = min(num_transition_barcodes,
                       num_barcodes_above_umi_cutoff - cell_barcodes.size)
             num = max(0, num)
-            transition_barcodes = umi_count_order[n_cells:
-                                                  (n_cells + num)]
+            transition_barcodes = umi_count_order[n_cells:(n_cells + num)]
 
             assert transition_barcodes.size > 0, \
                 f"There are no barcodes identified from the transition " \
@@ -690,27 +716,25 @@ class SingleCellRNACountsDataset:
 
                 # Plot the train error.
                 plt.subplot(3, 1, 1)
-                plt.plot(inferred_model.loss['train']['elbo'], '.--',
-                         label='Train')
+                plt.plot(inferred_model.loss['train']['elbo'], '.--', label='Train')
 
                 # Plot the test error, if there was held-out test data.
                 if 'test' in inferred_model.loss.keys():
                     if len(inferred_model.loss['test']['epoch']) > 0:
                         plt.plot(inferred_model.loss['test']['epoch'],
-                                 inferred_model.loss['test']['elbo'], 'o:',
-                                 label='Test')
+                                 inferred_model.loss['test']['elbo'], 'o:', label='Test')
                         plt.legend()
 
-                plt.gca().set_ylim(bottom=max(inferred_model.loss['train']
-                                              ['elbo'][0],
-                                              inferred_model.loss['train']
-                                              ['elbo'][-1] - 2000))
+                try:
+                    plt.gca().set_ylim(bottom=max(inferred_model.loss['train']['elbo'][0],
+                                                  inferred_model.loss['train']['elbo'][-1] - 2000))
+                except IndexError:
+                    pass
                 plt.xlabel('Epoch')
                 plt.ylabel('ELBO')
                 plt.title('Progress of the training procedure')
 
-                # Plot the barcodes used, along with the inferred
-                # cell probabilities.
+                # Plot the barcodes used, along with the inferred cell probabilities.
                 plt.subplot(3, 1, 2)
                 count_mat = self.get_count_matrix()
                 counts = np.array(count_mat.sum(axis=1)).squeeze()
@@ -718,23 +742,33 @@ class SingleCellRNACountsDataset:
                 plt.semilogy(counts[count_order], color='black')
                 plt.ylabel('UMI counts')
                 plt.xlabel('Barcode index, sorted by UMI count')
-                if p is not None:  # The case of a simple model.
-                    plt.gca().twinx()
-                    plt.plot(p[count_order], '.:', color='red', alpha=0.3)
-                    plt.ylabel('Cell probability', color='red')
-                    plt.ylim([-0.05, 1.05])
-                    plt.title('Determination of which barcodes contain cells')
-                else:
-                    plt.title('The subset of barcodes used for training')
+                try:
+                    if p is not None:  # The case of a simple model.
+                        plt.gca().twinx()
+                        plt.plot(p[count_order], '.:', color='red', alpha=0.3)
+                        plt.ylabel('Cell probability', color='red')
+                        plt.ylim([-0.05, 1.05])
+                        plt.title('Determination of which barcodes contain cells')
+                    else:
+                        plt.title('The subset of barcodes used for training')
+                except Exception:
+                    logging.warning('Error plotting cell probabilities.  '
+                                    'Panel 2 of output PDF is incomplete.')
+                    pass
 
                 # Plot the latent encoding via PCA.
                 plt.subplot(3, 1, 3)
-                pca = PCA(n_components=2)
-                if p is None:
-                    p = np.ones_like(d)
-                z_pca = pca.fit_transform(z[p >= 0.5])
-                plt.plot(z_pca[:, 0], z_pca[:, 1],
-                         '.', ms=3, color='black', alpha=0.3)
+                try:
+                    pca = PCA(n_components=2)
+                    if p is None:
+                        p = np.ones_like(d)
+                    z_pca = pca.fit_transform(z[p >= 0.5])
+                    plt.plot(z_pca[:, 0], z_pca[:, 1],
+                             '.', ms=3, color='black', alpha=0.3)
+                except Exception:
+                    logging.warning('Error plotting gene expression embedding PCA.  '
+                                    'Panel 3 of output PDF is incomplete.')
+                    pass
                 plt.ylabel('PC 1')
                 plt.xlabel('PC 0')
                 plt.title('PCA of latent encoding of cell gene expression')
