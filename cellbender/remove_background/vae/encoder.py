@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from typing import Dict, List, Optional
+from cellbender.remove_background.exceptions import NanException
 
 
 class CompositeEncoder(dict):
@@ -313,6 +314,9 @@ class EncodeNonZLatents(nn.Module):
 
             # Heuristic for initialization of epsilon.
             self.offset['epsilon'] = out[cells, 2].mean().item()
+
+        if out.isnan().sum() > 0:
+            raise NanException('NaN encountered in encoder')
 
         p_y_logit = ((out[:, 0] - self.offset['logit_p'])
                      * self.P_OUTPUT_SCALE).squeeze()
