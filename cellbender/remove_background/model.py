@@ -148,8 +148,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 .to(self.device)
             self.avg_gene_expression = dataset_obj.priors['chi_bar'] \
                 .to(self.device)
-            self.log_counts_crossover = dataset_obj.priors['log_counts_crossover'] \
-                .to(self.device)
+            self.log_counts_crossover = dataset_obj.priors['log_counts_crossover']
 
             self.empty_UMI_threshold = (torch.tensor(dataset_obj.empty_UMI_threshold)
                                         .float().to(self.device))
