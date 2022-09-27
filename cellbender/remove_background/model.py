@@ -286,7 +286,7 @@ class RemoveBackgroundPyroModel(nn.Module):
                 # Sample y, the presence of a real cell, based on p_logit_prior.
                 log_counts = x.sum(dim=-1).log()
                 logits = 2.5 * (log_counts - self.log_counts_crossover)
-                y = pyro.sample("y", dist.Bernoulli(logits=logits).expand_by([x.size(0)]))
+                y = pyro.sample("y", dist.Bernoulli(logits=logits))
 
             else:
                 d_empty = None
