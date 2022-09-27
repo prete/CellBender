@@ -148,6 +148,8 @@ class RemoveBackgroundPyroModel(nn.Module):
                 .to(self.device)
             self.avg_gene_expression = dataset_obj.priors['chi_bar'] \
                 .to(self.device)
+            self.log_counts_crossover = dataset_obj.priors['log_counts_crossover'] \
+                .to(self.device)
 
             self.empty_UMI_threshold = (torch.tensor(dataset_obj.empty_UMI_threshold)
                                         .float().to(self.device))
@@ -283,9 +285,9 @@ class RemoveBackgroundPyroModel(nn.Module):
                                       .expand_by([x.size(0)]))
 
                 # Sample y, the presence of a real cell, based on p_logit_prior.
-                y = pyro.sample("y",
-                                dist.Bernoulli(logits=self.p_logit_prior - 100.)  # TODO
-                                .expand_by([x.size(0)]))
+                log_counts = x.sum(dim=-1).log()
+                logits = 2.5 * (log_counts - self.log_counts_crossover)
+                y = pyro.sample("y", dist.Bernoulli(logits=logits).expand_by([x.size(0)]))
 
             else:
                 d_empty = None
